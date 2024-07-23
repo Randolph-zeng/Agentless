@@ -139,6 +139,10 @@ def transfer_arb_locs_to_locs(
     global_vars = parse_global_var_from_code(file_content)
 
     for model_pred_locs in locs:
+        # ZZ: TODO check if the length of model_pred_locs is always one
+        if isinstance(model_pred_locs, list):
+            assert len(model_pred_locs) == 1
+            model_pred_locs = model_pred_locs[0]
         current_class_name = ""
         for loc in model_pred_locs.splitlines():
             # handle cases like "class: MyClass.my_method"

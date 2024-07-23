@@ -11,8 +11,10 @@ from agentless.util.preprocess_data import (
     show_project_structure,
 )
 from agentless.construct.prompts import (
+    file_content_template,
     obtain_relevant_code_prompt,
     obtain_relevant_files_prompt,
+    file_content_in_block_template,
     obtain_relevant_code_combine_top_n_prompt,
     obtain_relevant_functions_from_compressed_files_prompt,
     obtain_relevant_code_combine_top_n_no_line_number_prompt,
@@ -132,7 +134,7 @@ class LLMFL(FL):
                         content = "\n".join(file_content[1])
                         file_content = line_wrap_content(content)
                         contents.append(
-                            self.file_content_template.format(
+                            file_content_template.format(
                                 file_name=file_name, file_content=file_content
                             )
                         )
@@ -192,7 +194,7 @@ class LLMFL(FL):
             fn: get_skeleton(code) for fn, code in file_contents.items()
         }
         contents = [
-            self.file_content_in_block_template.format(file_name=fn, file_content=code)
+            file_content_in_block_template.format(file_name=fn, file_content=code)
             for fn, code in compressed_file_contents.items()
         ]
         file_contents = "".join(contents)
