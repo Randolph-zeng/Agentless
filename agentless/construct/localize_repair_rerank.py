@@ -29,7 +29,7 @@ from agentless.util.postprocess_data import (
 from agentless.util.preprocess_data import (
     line_wrap_content,
     filter_none_python,
-    filter_none_python,
+    filter_out_test_files,
     transfer_arb_locs_to_locs,
     get_full_file_paths_and_classes_and_functions,
 )
@@ -134,7 +134,7 @@ def localize_instance(bench_data, args, existing_instance_ids, logger):
         "edit_loc_traj": edit_loc_traj,
     }
 
-    with open(args.output_file, "a") as f:
+    with open(args.loc_output_file, "a") as f:
         f.write( json.dumps(localize_info) + "\n")
     return localize_info, structure
 
@@ -156,6 +156,7 @@ def _post_process_multifile_repair(
         logger.info("=== file_to_commands: ===")
         logger.info(json.dumps(file_to_commands, indent=2))
         # Let's only edit the first file in the edit commands.
+        # ZZ: TODO check if this assumption holds or not ....
         edited_file_key = next(iter(file_to_commands.keys()))
         logger.info(f"=== edited_file: {edited_file_key} ===")
         edit_commands = file_to_commands[edited_file_key]
@@ -237,7 +238,7 @@ def construct_topn_file_context(
     return topn_content, file_loc_intervals
 
 
-def process_loc(localize_info, bench_data, structure, args, logger):
+def repair(localize_info, bench_data, structure, args, logger):
     instance_id = localize_info["instance_id"]
     logger.info(f"================ repairing {instance_id} ================")
     if len(localize_info["found_files"]) == 0:
@@ -255,18 +256,7 @@ def process_loc(localize_info, bench_data, structure, args, logger):
     pred_files = localize_info["found_files"][: args.top_n]
     problem_statement = bench_data["problem_statement"]
     files, _, _ = get_full_file_paths_and_classes_and_functions(structure)
-    raw_outputs, counts, all_generations, traj, prev_contents, file_names = (
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-    )
 
-    raw_output = ""
-    new_content = ""
-    topn_content = ""
     # Construct file contents
     file_contents = dict()
     for i, pred_file in enumerate(pred_files):
@@ -323,11 +313,7 @@ def process_loc(localize_info, bench_data, structure, args, logger):
     ).strip()
     logger.info(f"prompting with message:\n{message}")
 
-    all_generations, counts, traj, prev_contents, file_names = [], [], [], [], []
-    sample_responses = []
-    # Using early stopping will cost more since the input tokens will be charged multiple times.
-    # For now we disable it.
-    assert args.stop_at_n_unique_valid_samples == -1
+    sample_responses, traj = [], []
     # get temperature samples
     model = make_model(
         model=args.model,
@@ -337,9 +323,9 @@ def process_loc(localize_info, bench_data, structure, args, logger):
         temperature=0.8,
         batch_size=args.max_samples
     )
-    sample_trajs = model.codegen(message, num_samples=args.max_samples - 1)
+    sample_trajs = model.codegen(message, num_samples=args.max_samples)
     sample_responses.extend(sample_trajs)
-
+    repair_info_list = []
     count = 0
     while count < args.max_samples:
         print(f"trying the {count + 1}-th sample ...")
@@ -347,13 +333,9 @@ def process_loc(localize_info, bench_data, structure, args, logger):
         count += 1
         traj.append({**ret, "prompt": message})
 
-        if args.mock:
-            continue
-
         raw_output = ret["response"]
         logger.info(f"raw output:\n{raw_output}")
-        all_generations.append(raw_output)
-
+        # TODO: WARNING! Ensure if multiple files are within raw_output, they are all processed
         edited_file, new_content = _post_process_multifile_repair(
             raw_output,
             file_contents,
@@ -361,41 +343,63 @@ def process_loc(localize_info, bench_data, structure, args, logger):
             file_loc_intervals,
             diff_format=args.diff_format,
         )
-
-        if new_content == "":
-            prev_contents.append("")
-            file_names.append("")
+        if edited_file in file_contents:
+            content = file_contents[edited_file]
+            git_diff = fake_git_repo("playground", edited_file, content, new_content)
+            raw_git_diffs += "\n" + git_diff.replace(
+                "\ No newline at end of file\n", ""
+            )
+            syntax_success = check_syntax(new_content)
+            lint_success, prev_errors, errors = lint_code(
+                "playground", "test.py", new_content, file_contents[edited_file]
+            )
+            differ_by_empty_lines = check_code_differ_by_just_empty_lines(
+                new_content, file_contents[edited_file]
+            )
+            print(lint_success, prev_errors, errors, differ_by_empty_lines)
+            if syntax_success and not differ_by_empty_lines:
+                git_diffs = raw_git_diffs
+            else:
+                git_diffs = ""  # no need to evaluate
         else:
-            prev_content = file_contents[edited_file]
-            prev_contents.append(prev_content)
-            file_names.append(edited_file)
-
-        counts.append(count)
-        raw_outputs.append(raw_output)
-
-    repair_info = {
-        "instance_id": instance_id,
-        "raw_output": raw_outputs,
-        "all_generations": [all_generations],
-        "try_count": counts,
-        "traj": traj,
-        "prev_content": [prev_contents],
-        "file_names": [file_names],
-    }
-    with open(args.output_file, "a") as f:
-        f.write(json.dumps(repair_info) + "\n")
+            diff = list(
+                unified_diff(
+                    content.split("\n"),
+                    new_content.split("\n"),
+                    fromfile=edited_file,
+                    tofile=edited_file,
+                    lineterm="",
+                )
+            )
+            print("Failed parsing diff!")
+            print("\n".join(diff))
+        repair_info = {
+            "model_name_or_path": "agentless",
+            "instance_id": instance_id,
+            "model_patch": git_diffs.lstrip(),
+            "raw_model_patch": raw_git_diffs.lstrip(),
+            "original_file_content": content,
+            "try_count": count,
+            "edited_file": edited_file # TODO make sure this is a list
+        }
+        repair_info_list.append(repair_info)
+    with open(args.rep_output_file, "a") as f:
+        f.write(json.dumps(repair_info_list) + "\n")
+    return repair_info_list
 
 
 def localize_repair_rerank(bench_data, args, existing_instance_ids):
     log_file = os.path.join(args.output_folder, "logs", f"{bench_data['instance_id']}.log")
     logger = setup_logger(log_file)
     localize_info, structure = localize_instance(bench_data, args, existing_instance_ids, logger)
+    repair_info_list = repair(localize_info, bench_data, structure, args, logger)
+    
     
 
 def dispatch_tasks(args):
     swe_bench_data = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
     existing_instance_ids = (
-        load_existing_instance_ids(args.output_file) if args.skip_existing else set()
+        load_existing_instance_ids(args.final_output_file) if args.skip_existing else set()
     )
 
     if args.num_threads == 1:
@@ -418,6 +422,11 @@ def main():
     parser.add_argument("--add_space", action="store_true")
     parser.add_argument("--no_line_number", action="store_true")
     parser.add_argument("--sticky_scroll", action="store_true")
+    parser.add_argument("--loc_interval", action="store_true")
+    parser.add_argument("--fine_grain_loc_only", action="store_true")
+    parser.add_argument("--diff_format", action="store_true")
+    parser.add_argument("--cot", action="store_true")
+    parser.add_argument("--max_samples", type=int, default=20, help="Sampling budget.")
     parser.add_argument(
         "--match_partial_paths",
         action="store_true",
@@ -451,12 +460,13 @@ def main():
     args = parser.parse_args()
     args.loc_output_file = os.path.join(args.output_folder, "location_outputs.jsonl")
     args.rep_output_file = os.path.join(args.output_folder, "repair_outputs.jsonl")
+    args.final_output_file = os.path.join(args.output_folder, "predictions.jsonl")
     
     assert (not "deepseek" in args.model) or (
         args.backend == "deepseek"
     ), "Must specify `--backend deepseek` if using a DeepSeek model"
 
-    os.makedirs(os.path.join(args.output_folder, "localization_logs"), exist_ok=True)
+    os.makedirs(os.path.join(args.output_folder, "logs"), exist_ok=True)
     os.makedirs(args.output_folder, exist_ok=True)
 
     # write the arguments
