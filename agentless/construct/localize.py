@@ -19,9 +19,6 @@ from get_repo_structure.get_repo_structure import (
     get_project_structure_from_scratch,
 )
 
-# SET THIS IF YOU WANT TO USE THE PREPROCESSED FILES
-PROJECT_FILE_LOC = os.environ.get("PROJECT_FILE_LOC", None)
-
 
 def localize_instance(
     bench_data, args, existing_instance_ids
@@ -63,79 +60,59 @@ def localize_instance(
     additional_artifact_loc_edit_location = None
     file_traj, related_loc_traj, edit_loc_traj = {}, {}, {}
 
+    fl = LLMFL(
+        d["instance_id"],
+        structure,
+        problem_statement,
+        args.model,
+        args.backend,
+        logger,
+        args.match_partial_paths,
+    )
     # file level localization
-    if args.file_level:
-        fl = LLMFL(
-            d["instance_id"],
-            structure,
-            problem_statement,
-            args.model,
-            args.backend,
-            logger,
-            args.match_partial_paths,
-        )
-        found_files, additional_artifact_loc_file, file_traj = fl.localize(
-            mock=args.mock
-        )
+    found_files, additional_artifact_loc_file, file_traj = fl.localize(
+        mock=args.mock
+    )
 
     # related class, functions, global var localization
-    if args.related_level:
-        if len(found_files) != 0:
-            pred_files = found_files[: args.top_n]
-            fl = LLMFL(
-                d["instance_id"],
-                structure,
-                problem_statement,
-                args.model,
-                args.backend,
-                logger,
-                args.match_partial_paths,
-            )
-            additional_artifact_loc_related = []
-            found_related_locs = []
-            related_loc_traj = {}
-            (
-                found_related_locs,
-                additional_artifact_loc_related,
-                related_loc_traj,
-            ) = fl.localize_function_from_compressed_files(
-                pred_files, mock=args.mock
-            )
-            additional_artifact_loc_related = [additional_artifact_loc_related]
-            
-
-    if args.fine_grain_line_level:
-        # Only supports the following args for now
+    if len(found_files) != 0:
         pred_files = found_files[: args.top_n]
-        fl = LLMFL(
-            instance_id,
-            structure,
-            problem_statement,
-            args.model,
-            args.backend,
-            logger,
-            args.match_partial_paths,
-        )
-        coarse_found_locs = {}
-        for i, pred_file in enumerate(pred_files):
-            if len(found_related_locs) > i:
-                coarse_found_locs[pred_file] = found_related_locs[i]
+        
+        additional_artifact_loc_related = []
+        found_related_locs = []
+        related_loc_traj = {}
         (
-            found_edit_locs,
-            additional_artifact_loc_edit_location,
-            edit_loc_traj,
-        ) = fl.localize_line_from_coarse_function_locs(
-            pred_files,
-            coarse_found_locs,
-            context_window=args.context_window,
-            add_space=args.add_space,
-            no_line_number=args.no_line_number,
-            sticky_scroll=args.sticky_scroll,
-            mock=args.mock,
-            temperature=args.temperature,
-            num_samples=args.num_samples,
+            found_related_locs,
+            additional_artifact_loc_related,
+            related_loc_traj,
+        ) = fl.localize_function_from_compressed_files(
+            pred_files, mock=args.mock
         )
-        additional_artifact_loc_edit_location = [additional_artifact_loc_edit_location]
+        additional_artifact_loc_related = [additional_artifact_loc_related]
+        
+
+    # Only supports the following args for now
+    pred_files = found_files[: args.top_n]
+    coarse_found_locs = {}
+    for i, pred_file in enumerate(pred_files):
+        if len(found_related_locs) > i:
+            coarse_found_locs[pred_file] = found_related_locs[i]
+    (
+        found_edit_locs,
+        additional_artifact_loc_edit_location,
+        edit_loc_traj,
+    ) = fl.localize_line_from_coarse_function_locs(
+        pred_files,
+        coarse_found_locs,
+        context_window=args.context_window,
+        add_space=args.add_space,
+        no_line_number=args.no_line_number,
+        sticky_scroll=args.sticky_scroll,
+        mock=args.mock,
+        temperature=args.temperature,
+        num_samples=args.num_samples,
+    )
+    additional_artifact_loc_edit_location = [additional_artifact_loc_edit_location]
 
     with open(args.output_file, "a") as f:
         f.write(
@@ -218,7 +195,7 @@ def main():
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default="gpt-4o-mini-2024-07-18",
         choices=["gpt-4o-2024-05-13", "deepseek-coder", "gpt-4o-mini-2024-07-18"],
     )
     parser.add_argument(
