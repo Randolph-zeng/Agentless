@@ -1,27 +1,8 @@
-import argparse
 import ast
-import json
 import os
 import subprocess
 import uuid
 
-import pandas as pd
-from tqdm import tqdm
-
-repo_to_top_folder = {
-    "django/django": "django",
-    "sphinx-doc/sphinx": "sphinx",
-    "scikit-learn/scikit-learn": "scikit-learn",
-    "sympy/sympy": "sympy",
-    "pytest-dev/pytest": "pytest",
-    "matplotlib/matplotlib": "matplotlib",
-    "astropy/astropy": "astropy",
-    "pydata/xarray": "xarray",
-    "mwaskom/seaborn": "seaborn",
-    "psf/requests": "requests",
-    "pylint-dev/pylint": "pylint",
-    "pallets/flask": "flask",
-}
 
 
 def checkout_commit(repo_path, commit_id):
@@ -43,16 +24,17 @@ def checkout_commit(repo_path, commit_id):
 
 def clone_repo(repo_name, repo_playground):
     try:
-
+        # ZZ: get rid of user name space and use the pure repo name only 
+        pure_repo_name = repo_name.split('/')[-1]
         print(
-            f"Cloning repository from https://github.com/{repo_name}.git to {repo_playground}/{repo_to_top_folder[repo_name]}..."
+            f"Cloning repository from https://github.com/{repo_name}.git to {repo_playground}/{pure_repo_name}..."
         )
         subprocess.run(
             [
                 "git",
                 "clone",
                 f"https://github.com/{repo_name}.git",
-                f"{repo_playground}/{repo_to_top_folder[repo_name]}",
+                f"{repo_playground}/{pure_repo_name}",
             ],
             check=True,
         )
@@ -67,22 +49,21 @@ def get_project_structure_from_scratch(
     repo_name, commit_id, instance_id, repo_playground
 ):
 
-    # Generate a temperary folder and add uuid to avoid collision
-    repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
+    
+    pure_repo_name = repo_name.split('/')[-1]
+    repo_playground = os.path.join(repo_playground, pure_repo_name)
 
     # assert playground doesn't exist
-    assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
-
-    # create playground
-    os.makedirs(repo_playground)
-
-    clone_repo(repo_name, repo_playground)
-    checkout_commit(f"{repo_playground}/{repo_to_top_folder[repo_name]}", commit_id)
-    structure = create_structure(f"{repo_playground}/{repo_to_top_folder[repo_name]}")
-    # clean up
-    subprocess.run(
-        ["rm", "-rf", f"{repo_playground}/{repo_to_top_folder[repo_name]}"], check=True
-    )
+    if not os.path.exists(repo_playground):
+        # create playground
+        os.makedirs(repo_playground)
+        clone_repo(repo_name, repo_playground)
+    checkout_commit(f"{repo_playground}/{pure_repo_name}", commit_id)
+    structure = create_structure(f"{repo_playground}/{pure_repo_name}")
+    # ZZ: Do not perform clean up so that we can reuse the repo 
+    # subprocess.run(
+    #     ["rm", "-rf", f"{repo_playground}/{repo_to_top_folder[repo_name]}"], check=True
+    # )
     d = {
         "repo": repo_name,
         "base_commit": commit_id,
