@@ -1,5 +1,6 @@
 import concurrent.futures
 import os, json, argparse
+from collections import Counter
 from difflib import unified_diff
 from datasets import load_dataset
 from agentless.construct.FL import LLMFL
@@ -19,6 +20,7 @@ from agentless.util.postprocess_data import (
     lint_code,
     check_syntax,
     fake_git_repo,
+    normalize_patch,
     remove_empty_lines,
     parse_edit_commands,
     extract_python_blocks,
@@ -175,20 +177,6 @@ def _post_process_multifile_repair(
     except Exception as e:
         logger.error(e)
         return edited_file, new_content
-
-    diff = list(
-        unified_diff(
-            content.split("\n"),
-            new_content.split("\n"),
-            fromfile=edited_file,
-            tofile=edited_file,
-            lineterm="",
-        )
-    )
-
-    logger.info(f"extracted patch:")
-    logger.info("\n".join(diff))
-    print("\n".join(diff))
     return edited_file, new_content
 
 
@@ -242,16 +230,15 @@ def repair(localize_info, bench_data, structure, args, logger):
     instance_id = localize_info["instance_id"]
     logger.info(f"================ repairing {instance_id} ================")
     if len(localize_info["found_files"]) == 0:
-        # ZZ: TODO fix this return format
-        return {
+        return [{
+            "model_name_or_path": "agentless",
             "instance_id": instance_id,
-            "raw_output": [""],
-            "try_count": [0],
-            "all_generations": [[]],
-            "traj": [],
-            "prev_content": [[]],
-            "file_names": [[]],
-        }
+            "model_patch": "",
+            "raw_model_patch": "",
+            "original_file_content": "",
+            "try_count": 0,
+            "edited_file": "" 
+        }]
 
     pred_files = localize_info["found_files"][: args.top_n]
     problem_statement = bench_data["problem_statement"]
@@ -287,16 +274,16 @@ def repair(localize_info, bench_data, structure, args, logger):
     )
 
     if topn_content.strip() == "":
-        # ZZ TODO fix this return format
-        return {
+        return [{
+            "model_name_or_path": "agentless",
             "instance_id": instance_id,
-            "raw_output": [""],
-            "try_count": [0],
-            "all_generations": [[]],
-            "traj": [],
-            "prev_content": [[]],
-            "file_names": [[]],
-        }
+            "model_patch": "",
+            "raw_model_patch": "",
+            "original_file_content": "",
+            "try_count": 0,
+            "edited_file": "" 
+        }]
+        
 
     prompt_template = (
         repair_prompt_combine_topn_cot_diff
@@ -343,6 +330,7 @@ def repair(localize_info, bench_data, structure, args, logger):
             file_loc_intervals,
             diff_format=args.diff_format,
         )
+        raw_git_diffs = ""
         if edited_file in file_contents:
             content = file_contents[edited_file]
             git_diff = fake_git_repo("playground", edited_file, content, new_content)
@@ -388,11 +376,74 @@ def repair(localize_info, bench_data, structure, args, logger):
     return repair_info_list
 
 
+def deduplicate_patches(repair_info_list) -> list[str]:
+    """Returns all unique patches."""
+    patch_keys = [info_obj["normalized_patch"] for info_obj in repair_info_list]
+    
+    unique_patches = set()
+    claned_patches = []
+    for i in range(len(patch_keys)):
+        patch_key = patch_keys[i].strip()
+        if patch_key and patch_key not in unique_patches:
+            unique_patches.add(patch_key)
+            claned_patches.append(repair_info_list[i])
+    return claned_patches
+
+
+def normalize(repair_info_list):
+    for d in repair_info_list:
+        instance_id = d["instance_id"]
+        patch = d["model_patch"]
+        original_file_content = d["original_file_content"]
+        normalized_patch = normalize_patch(
+            instance_id, patch, original_file_content
+        )
+        d["normalized_patch"] = normalized_patch
+
+
+def majority_voting(repair_info_list, args):
+    patch_keys = [info_obj["normalized_patch"] for info_obj in repair_info_list]    
+    raw_patches = [info_obj["model_patch"] for info_obj in repair_info_list]
+
+    patch_ids = [i for i in range(len(raw_patches)) if raw_patches[i].strip()]
+    vote = Counter()
+    first_appear_idx = dict()
+    for i in patch_ids:
+        sample = repair_info_list[i]
+        patch_key, patch = sample["normalized_patch"], sample["model_patch"]
+        vote[patch_key] += 1
+        if patch_key not in first_appear_idx:
+            first_appear_idx[patch_key] = i
+
+    maj_selected_id = max(
+        patch_ids,
+        key=lambda i: (vote[patch_keys[i]], -first_appear_idx[patch_keys[i]]),
+    )
+
+    sample = repair_info_list[maj_selected_id]
+    result = {
+        "model_name_or_path": "agentless",
+        "instance_id": sample['instance_id'],
+        "model_patch": sample["model_patch"],
+    }
+    with open(args.final_output_file, "a") as f:
+        f.write(json.dumps(result) + "\n")
+    return result
+
+
+
 def localize_repair_rerank(bench_data, args, existing_instance_ids):
     log_file = os.path.join(args.output_folder, "logs", f"{bench_data['instance_id']}.log")
     logger = setup_logger(log_file)
     localize_info, structure = localize_instance(bench_data, args, existing_instance_ids, logger)
+    if not localize_info['found_files']:
+        logger.warning(f"Instance-{localize_info['instance_id']} fail to localize any files ......")
+        return None
     repair_info_list = repair(localize_info, bench_data, structure, args, logger)
+    normalize(repair_info_list)
+    repair_info_list = deduplicate_patches(repair_info_list)
+    final_result = majority_voting(repair_info_list, args)
+    return final_result
     
     
 
@@ -451,7 +502,7 @@ def main():
         "--model",
         type=str,
         default="gpt-4o-mini-2024-07-18",
-        choices=["gpt-4o-2024-05-13", "deepseek-coder", "gpt-4o-mini-2024-07-18"],
+        choices=["gpt-4o-2024-05-13", "deepseek-coder", "deepseek-chat", "gpt-4o-mini-2024-07-18"],
     )
     parser.add_argument(
         "--backend", type=str, default="openai", choices=["openai", "deepseek"]
