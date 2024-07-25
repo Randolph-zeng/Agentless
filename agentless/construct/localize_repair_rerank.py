@@ -149,8 +149,7 @@ def _post_process_multifile_repair(
     diff_format=False,
 ):
     edit_multifile_commands = extract_python_blocks(raw_output)
-    edited_file = ""
-    new_content = ""
+    edited_file_list, new_content_list = [], []
     try:
         file_to_commands = split_edit_multifile_commands(
             edit_multifile_commands, diff_format=diff_format
@@ -158,26 +157,29 @@ def _post_process_multifile_repair(
         logger.info("=== file_to_commands: ===")
         logger.info(json.dumps(file_to_commands, indent=2))
         # Let's only edit the first file in the edit commands.
-        # ZZ: TODO check if this assumption holds or not ....
-        edited_file_key = next(iter(file_to_commands.keys()))
-        logger.info(f"=== edited_file: {edited_file_key} ===")
-        edit_commands = file_to_commands[edited_file_key]
-        logger.info("=== edit_commands: ===")
-        for c in edit_commands:
-            logger.info(c)
-            logger.info("\n" + "-" * 40)
-        edited_file = eval(edited_file_key)  # convert '"file.py"' to 'file.py'
-        content = file_contents[edited_file]
-        if diff_format:
-            new_content = parse_diff_edit_commands(
-                edit_commands, content, file_loc_intervals[edited_file]
-            )
-        else:
-            new_content = parse_edit_commands(edit_commands, content)
+        # ZZ: TODO iterate over all files instead of the first one!
+        for edited_file_key in file_to_commands.keys():
+            logger.info(f"=== edited_file: {edited_file_key} ===")
+            edit_commands = file_to_commands[edited_file_key]
+            logger.info("=== edit_commands: ===")
+            for c in edit_commands:
+                logger.info(c)
+                logger.info("\n" + "-" * 40)
+            edited_file = eval(edited_file_key)  # convert '"file.py"' to 'file.py'
+            content = file_contents[edited_file]
+            if diff_format:
+                # TODO: Make sure this parse diff format is doing correct thing ....
+                new_content = parse_diff_edit_commands(
+                    edit_commands, content, file_loc_intervals[edited_file]
+                )
+            else:
+                new_content = parse_edit_commands(edit_commands, content)
+            edited_file_list.append(edited_file)
+            new_content_list.append(new_content)
     except Exception as e:
         logger.error(e)
-        return edited_file, new_content
-    return edited_file, new_content
+        return edited_file_list, new_content_list
+    return edited_file_list, new_content_list
 
 
 def construct_topn_file_context(
@@ -323,52 +325,39 @@ def repair(localize_info, bench_data, structure, args, logger):
         raw_output = ret["response"]
         logger.info(f"raw output:\n{raw_output}")
         # TODO: WARNING! Ensure if multiple files are within raw_output, they are all processed
-        edited_file, new_content = _post_process_multifile_repair(
+        edited_file_list, new_content_list = _post_process_multifile_repair(
             raw_output,
             file_contents,
             logger,
             file_loc_intervals,
             diff_format=args.diff_format,
         )
-        raw_git_diffs = ""
-        if edited_file in file_contents:
-            content = file_contents[edited_file]
-            git_diff = fake_git_repo("playground", edited_file, content, new_content)
-            raw_git_diffs += "\n" + git_diff.replace(
-                "\ No newline at end of file\n", ""
-            )
-            syntax_success = check_syntax(new_content)
-            lint_success, prev_errors, errors = lint_code(
-                "playground", "test.py", new_content, file_contents[edited_file]
-            )
-            differ_by_empty_lines = check_code_differ_by_just_empty_lines(
-                new_content, file_contents[edited_file]
-            )
-            print(lint_success, prev_errors, errors, differ_by_empty_lines)
-            if syntax_success and not differ_by_empty_lines:
-                git_diffs = raw_git_diffs
-            else:
-                git_diffs = ""  # no need to evaluate
-        else:
-            diff = list(
-                unified_diff(
-                    content.split("\n"),
-                    new_content.split("\n"),
-                    fromfile=edited_file,
-                    tofile=edited_file,
-                    lineterm="",
+        raw_git_diffs, normalized_git_diffs = "", ""
+        for edited_file, new_content in zip(edited_file_list, new_content_list):
+            if edited_file in file_contents:
+                content = file_contents[edited_file]
+                git_diff = fake_git_repo("playground", edited_file, content, new_content)
+                syntax_success = check_syntax(new_content)
+                lint_success, prev_errors, errors = lint_code(
+                    "playground", "test.py", new_content, file_contents[edited_file]
                 )
-            )
-            print("Failed parsing diff!")
-            print("\n".join(diff))
+                differ_by_empty_lines = check_code_differ_by_just_empty_lines(
+                    new_content, file_contents[edited_file]
+                )
+                print(lint_success, prev_errors, errors, differ_by_empty_lines)
+                if syntax_success and not differ_by_empty_lines:
+                    # ZZ: only add patches that are syntactically correct
+                    normalized_patch = normalize_patch(instance_id, git_diff, content)
+                    normalized_git_diffs += "\n" + normalized_patch
+                    raw_git_diffs += "\n" + git_diff.replace("\ No newline at end of file\n", "")
+            else:
+                raise f"the edited file is not found: {edited_file}, instance-id: {instance_id} "
         repair_info = {
             "model_name_or_path": "agentless",
             "instance_id": instance_id,
-            "model_patch": git_diffs.lstrip(),
-            "raw_model_patch": raw_git_diffs.lstrip(),
-            "original_file_content": content,
+            "model_patch": raw_git_diffs.lstrip(),
             "try_count": count,
-            "edited_file": edited_file # TODO make sure this is a list
+            "normalized_patch": normalized_git_diffs
         }
         repair_info_list.append(repair_info)
     with open(args.rep_output_file, "a") as f:
@@ -388,17 +377,6 @@ def deduplicate_patches(repair_info_list) -> list[str]:
             unique_patches.add(patch_key)
             claned_patches.append(repair_info_list[i])
     return claned_patches
-
-
-def normalize(repair_info_list):
-    for d in repair_info_list:
-        instance_id = d["instance_id"]
-        patch = d["model_patch"]
-        original_file_content = d["original_file_content"]
-        normalized_patch = normalize_patch(
-            instance_id, patch, original_file_content
-        )
-        d["normalized_patch"] = normalized_patch
 
 
 def majority_voting(repair_info_list, args):
@@ -440,7 +418,6 @@ def localize_repair_rerank(bench_data, args, existing_instance_ids):
         logger.warning(f"Instance-{localize_info['instance_id']} fail to localize any files ......")
         return None
     repair_info_list = repair(localize_info, bench_data, structure, args, logger)
-    normalize(repair_info_list)
     repair_info_list = deduplicate_patches(repair_info_list)
     final_result = majority_voting(repair_info_list, args)
     return final_result
