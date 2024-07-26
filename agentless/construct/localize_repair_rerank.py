@@ -302,7 +302,6 @@ def repair(localize_info, bench_data, structure, args, logger):
     ).strip()
     logger.info(f"prompting with message:\n{message}")
 
-    sample_responses, traj = [], []
     # get temperature samples
     model = make_model(
         model=args.model,
@@ -312,15 +311,14 @@ def repair(localize_info, bench_data, structure, args, logger):
         temperature=0.8,
         batch_size=args.max_samples
     )
-    sample_trajs = model.codegen(message, num_samples=args.max_samples)
-    sample_responses.extend(sample_trajs)
+    sample_responses = model.codegen(message, num_samples=args.max_samples)
     repair_info_list = []
     count = 0
     while count < args.max_samples:
         print(f"trying the {count + 1}-th sample ...")
         ret = sample_responses[count]
         count += 1
-        traj.append({**ret, "prompt": message})
+        curr_traj = {**ret, "prompt": message}
 
         raw_output = ret["response"]
         logger.info(f"raw output:\n{raw_output}")
@@ -357,7 +355,8 @@ def repair(localize_info, bench_data, structure, args, logger):
             "instance_id": instance_id,
             "model_patch": raw_git_diffs.lstrip(),
             "try_count": count,
-            "normalized_patch": normalized_git_diffs
+            "normalized_patch": normalized_git_diffs,
+            "repair_trajectory": curr_traj
         }
         repair_info_list.append(repair_info)
     with open(args.rep_output_file, "a") as f:
@@ -403,12 +402,27 @@ def majority_voting(repair_info_list, args):
         "model_name_or_path": "agentless",
         "instance_id": sample['instance_id'],
         "model_patch": sample["model_patch"],
+        "final_repair_trajectory": sample["repair_trajectory"]
     }
     with open(args.final_output_file, "a") as f:
         f.write(json.dumps(result) + "\n")
     return result
 
 
+
+def assemble_trajectories(args, localize_info, repair_info_list, final_result):
+    trajectories = {
+        "instance_id": localize_info["instance_id"],
+        "file_traj": localize_info["file_traj"],
+        "related_loc_traj": localize_info["related_loc_traj"],
+        "edit_loc_traj": localize_info["edit_loc_traj"],
+        "candidate_repair_traj": [info["repair_trajectory"] for info in repair_info_list],
+        "selected_repair_traj": final_result["final_repair_trajectory"]
+    }
+    with open(args.traj_output_file, "a") as f:
+        f.write(json.dumps(trajectories)+"\n")
+    return trajectories
+    
 
 def localize_repair_rerank(bench_data, args, existing_instance_ids):
     log_file = os.path.join(args.output_folder, "logs", f"{bench_data['instance_id']}.log")
@@ -420,12 +434,13 @@ def localize_repair_rerank(bench_data, args, existing_instance_ids):
     repair_info_list = repair(localize_info, bench_data, structure, args, logger)
     repair_info_list = deduplicate_patches(repair_info_list)
     final_result = majority_voting(repair_info_list, args)
-    return final_result
+    all_trajectories = assemble_trajectories(args, localize_info, repair_info_list, final_result)
+    return all_trajectories
     
     
 
 def dispatch_tasks(args):
-    swe_bench_data = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+    swe_bench_data = load_dataset("princeton-nlp/SWE-bench", split="train")
     existing_instance_ids = (
         load_existing_instance_ids(args.final_output_file) if args.skip_existing else set()
     )
@@ -489,6 +504,7 @@ def main():
     args.loc_output_file = os.path.join(args.output_folder, "location_outputs.jsonl")
     args.rep_output_file = os.path.join(args.output_folder, "repair_outputs.jsonl")
     args.final_output_file = os.path.join(args.output_folder, "predictions.jsonl")
+    args.traj_output_file = os.path.join(args.output_folder, "trajectories.jsonl")
     
     assert (not "deepseek" in args.model) or (
         args.backend == "deepseek"
