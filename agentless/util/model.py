@@ -112,8 +112,8 @@ class DeepSeekChatDecoder(DecoderBase):
             futures = [executor.submit(request_chatgpt_engine, config, self.logger, 
                         "https://api.deepseek.com") for _ in range(num_samples)]
             concurrent.futures.wait(futures)
-        
-        for ret in futures:
+        request_results = [ft.result() for ft in futures] 
+        for ret in request_results:
             if ret:
                 trajs.append(
                     {
