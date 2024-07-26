@@ -11,13 +11,15 @@ Please look through the following GitHub problem description and Repository stru
 
 ###
 
-Please only provide the full path and return at most 5 files.
-The returned files should be separated by new lines ordered by most to least important and wrapped with ```
-For example:
-```
-file1.py
-file2.py
-```
+Based on the problem description and repo structure, please give a brief analysis on which set of files are necessary to edit, then retrieve the relevant directory structures and return at most 10 files in full path.
+Following is the desired format:
+### 
+Analysis: [Insert a brief analysis on which set of files are necessary to edit based on the problem description and repo structure]
+###
+Relevant Directories: [Retrieve the complete relevant directories from the Repository Structure here based on your analysis]
+###
+Relevant File Paths: [Put at most 10 **FULL PATHS** of the files that are relevant to the problem here. Each path should be in a single line]
+###
 """
 
     

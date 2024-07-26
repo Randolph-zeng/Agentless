@@ -24,17 +24,16 @@ def checkout_commit(repo_path, commit_id):
 
 def clone_repo(repo_name, repo_playground):
     try:
-        # ZZ: get rid of user name space and use the pure repo name only 
-        pure_repo_name = repo_name.split('/')[-1]
+        # ZZ: use mirror website to speed up the git clone and commit checkout ... 
         print(
-            f"Cloning repository from https://github.com/{repo_name}.git to {repo_playground}/{pure_repo_name}..."
+            f"Cloning repository from mirror https://gitclone.com/github.com/{repo_name}.git to {repo_playground}..."
         )
         subprocess.run(
             [
                 "git",
                 "clone",
-                f"https://github.com/{repo_name}.git",
-                f"{repo_playground}/{pure_repo_name}",
+                f"https://gitclone.com/github.com/{repo_name}.git",
+                f"{repo_playground}",
             ],
             check=True,
         )
@@ -58,8 +57,8 @@ def get_project_structure_from_scratch(
         # create playground
         os.makedirs(repo_playground)
         clone_repo(repo_name, repo_playground)
-    checkout_commit(f"{repo_playground}/{pure_repo_name}", commit_id)
-    structure = create_structure(f"{repo_playground}/{pure_repo_name}")
+    checkout_commit(repo_playground, commit_id)
+    structure = create_structure(repo_playground)
     # ZZ: Do not perform clean up so that we can reuse the repo 
     # subprocess.run(
     #     ["rm", "-rf", f"{repo_playground}/{repo_to_top_folder[repo_name]}"], check=True
