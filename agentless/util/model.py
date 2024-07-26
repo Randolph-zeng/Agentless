@@ -1,6 +1,6 @@
-from abc import ABC, abstractmethod
 from typing import List
-
+import concurrent.futures
+from abc import ABC, abstractmethod
 from agentless.util.api_requests import create_chatgpt_config, request_chatgpt_engine
 
 
@@ -101,7 +101,7 @@ class DeepSeekChatDecoder(DecoderBase):
             assert num_samples == 1
 
         trajs = []
-        for _ in range(num_samples):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_samples) as executor:
             config = create_chatgpt_config(
                 message=message,
                 max_tokens=self.max_new_tokens,
@@ -109,9 +109,11 @@ class DeepSeekChatDecoder(DecoderBase):
                 batch_size=1,
                 model=self.name,
             )
-            ret = request_chatgpt_engine(
-                config, self.logger, base_url="https://api.deepseek.com"
-            )
+            futures = [executor.submit(request_chatgpt_engine, config, self.logger, 
+                        "https://api.deepseek.com") for _ in range(num_samples)]
+            concurrent.futures.wait(futures)
+        
+        for ret in futures:
             if ret:
                 trajs.append(
                     {
