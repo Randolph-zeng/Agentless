@@ -5,8 +5,8 @@ from difflib import unified_diff
 from datasets import load_dataset
 from agentless.construct.FL import LLMFL
 from agentless.util.model import make_model
-from agentless.util.utils import (load_existing_instance_ids, setup_logger)
 from get_repo_structure.get_repo_structure import (get_project_structure_from_scratch)
+from agentless.util.utils import (load_existing_instance_ids, setup_logger, parse_git_patch)
 from agentless.construct.prompts import (
     with_scope_explanation,
     repair_prompt_combine_topn,
@@ -37,13 +37,9 @@ from agentless.util.preprocess_data import (
 )
 
 
-def localize_instance(bench_data, args, existing_instance_ids, logger):
+def localize_instance(bench_data, args, logger, patch_info):
     instance_id = bench_data["instance_id"]
     logger.info(f"Processing bug {instance_id}")
-
-    if instance_id in existing_instance_ids:
-        logger.info(f"Skipping existing instance_id: {instance_id}")
-        return
 
     # we need to get the project structure directly
     # ZZ: TODO support multi-thread logic here  
@@ -424,10 +420,10 @@ def assemble_trajectories(args, localize_info, repair_info_list, final_result):
     return trajectories
     
 
-def localize_repair_rerank(bench_data, args, existing_instance_ids):
+def localize_repair_rerank(bench_data, args, patch_info):
     log_file = os.path.join(args.output_folder, "logs", f"{bench_data['instance_id']}.log")
     logger = setup_logger(log_file)
-    localize_info, structure = localize_instance(bench_data, args, existing_instance_ids, logger)
+    localize_info, structure = localize_instance(bench_data, args, logger, patch_info)
     if not localize_info['found_files']:
         logger.warning(f"Instance-{localize_info['instance_id']} fail to localize any files ......")
         return None
@@ -444,14 +440,22 @@ def dispatch_tasks(args):
     existing_instance_ids = (
         load_existing_instance_ids(args.final_output_file) if args.skip_existing else set()
     )
-
+    filtered_bench_data_list, parsed_patch_info_list = [], []
+    for bench_data in swe_bench_data:
+        if bench_data['instance_id'] in existing_instance_ids: continue # skip existing ids
+        patch_info, modified_file_num, invalid_patch_parsing = parse_git_patch(bench_data["patch"])
+        if modified_file_num <= 10 and not invalid_patch_parsing:
+            # get rid of invalid patch commits and patches with too many modified files 
+            filtered_bench_data_list.append(bench_data)
+            parsed_patch_info_list.append(patch_info)
     if args.num_threads == 1:
-        for bench_data in swe_bench_data:
-            localize_repair_rerank(bench_data, args, existing_instance_ids)
+        for bench_data, patch_info in zip(filtered_bench_data_list, parsed_patch_info_list):
+            localize_repair_rerank(bench_data, args, patch_info)
     else:
+        # TODO: modify to support multi-thread request
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.num_threads) as executor:
             futures = [executor.submit(localize_repair_rerank, bench_data, args, 
-                        existing_instance_ids) for bench_data in swe_bench_data]
+                        patch_info) for bench_data, patch_info in zip(filtered_bench_data_list, parsed_patch_info_list)]
             concurrent.futures.wait(futures)
 
 

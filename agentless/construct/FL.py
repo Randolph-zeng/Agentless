@@ -101,9 +101,6 @@ class LLMFL(FL):
             model_found_files = raw_output.split("Relevant File Paths:")[-1].strip().split("\n")
         else:
             model_found_files = []
-        
-        model_found_files = self._parse_model_return_lines(raw_output)
-
         files, classes, functions = get_full_file_paths_and_classes_and_functions(
             self.structure
         )

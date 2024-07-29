@@ -96,6 +96,8 @@ def parse_git_patch(patch):
 
     # Split the patch by 'diff --git' to handle each file separately
     file_match_locs = [m for m in re.finditer(file_pattern, patch)]
+    modified_file_num = len(file_match_locs)
+    invalid_patch_parsing = False
     for f_m_idx, f_match in enumerate(file_match_locs):
         file_start_idx = f_match.start()
         file_end_idx = file_match_locs[f_m_idx+1].start() if (f_m_idx+1) < len(file_match_locs) else None
@@ -125,6 +127,10 @@ def parse_git_patch(patch):
                         new_hunk_lines.append(line[1:])
                     else:
                         new_hunk_lines.append(line)
+            if not (abs(int(orig_line_count) - len(orig_hunk_lines)) <= 1
+                and abs(int(new_line_count) - len(new_hunk_lines)) <=1):
+                # This usually happens when the patch itself contains the special git header that messed the re matching
+                invalid_patch_parsing = True
             results.append({
                 "original_file_path": orig_file_path,
                 "new_file_path": new_file_path,
@@ -137,4 +143,4 @@ def parse_git_patch(patch):
                 "new_line_count": new_line_count,
                 "hunk_content": modified_hunk_content
             })
-    return results
+    return results, modified_file_num, invalid_patch_parsing
