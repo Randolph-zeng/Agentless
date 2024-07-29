@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-
+from agentless.util.model import make_model
 from agentless.repair.repair import construct_topn_file_context
 from agentless.util.compress_file import get_skeleton
 from agentless.util.postprocess_data import extract_code_blocks, extract_locs_for_files
@@ -14,6 +14,7 @@ from agentless.construct.prompts import (
     file_content_template,
     obtain_relevant_code_prompt,
     obtain_relevant_files_prompt,
+    obtain_relevant_files_prompt_with_hint,
     file_content_in_block_template,
     obtain_relevant_code_combine_top_n_prompt,
     obtain_relevant_functions_from_compressed_files_prompt,
@@ -58,33 +59,41 @@ class LLMFL(FL):
         if content:
             return content.strip().split("\n")
 
+    def _request_file_localization(self, hinted, model, ground_truth_modified_files=None):
+        if hinted:
+            message = obtain_relevant_files_prompt_with_hint.format(
+                problem_statement=self.problem_statement,
+                structure=show_project_structure(self.structure).strip(),
+                ground_truth_modified_files="\n".join(ground_truth_modified_files)
+            ).strip()
+        else:    
+            message = obtain_relevant_files_prompt.format(
+                problem_statement=self.problem_statement,
+                structure=show_project_structure(self.structure).strip(),
+            ).strip()
+        traj = model.codegen(message, num_samples=1)[0]
+        traj["prompt"] = message
+        # ZZ: use customized parse logic here
+        if "Relevant File Paths:" in traj["response"]:
+            model_found_files = traj["response"].split("Relevant File Paths:")[-1].strip().split("\n")
+        else:
+            model_found_files = []
+        return model_found_files, traj
+    
+    def _construct_file_localization_trajectory(self, found_files, ground_truth_modified_files, traj, hinted):
+        return {
+            "stage": "fault_localization:file_localization",
+            "prompt": traj["prompt"],
+            "response": traj["response"],
+            "predicted_modified_files": found_files,
+            "ground_truth_modified_files": ground_truth_modified_files,
+            "hinted": hinted
+        }
+
     def localize(
-        self, top_n=1, mock=False, match_partial_paths=False
+        self, patch_info, match_partial_paths=False
     ) -> tuple[list, list, list, any]:
-        # lazy import, not sure if this is actually better?
-        from agentless.util.api_requests import num_tokens_from_messages
-        from agentless.util.model import make_model
-
-        found_files = []
-
-        message = obtain_relevant_files_prompt.format(
-            problem_statement=self.problem_statement,
-            structure=show_project_structure(self.structure).strip(),
-        ).strip()
-        self.logger.info(f"prompting with message:\n{message}")
-        print(f"prompting with message:\n{message}")
-        self.logger.info("=" * 80)
-        print("=" * 80)
-        if mock:
-            self.logger.info("Skipping querying model since mock=True")
-            traj = {
-                "prompt": message,
-                "usage": {
-                    "prompt_tokens": num_tokens_from_messages(message, self.model_name),
-                },
-            }
-            return [], {"raw_output_loc": ""}, traj
-
+        ground_truth_modified_files = set([info["original_file_path"] for info in patch_info])
         model = make_model(
             model=self.model_name,
             backend=self.backend,
@@ -93,35 +102,22 @@ class LLMFL(FL):
             temperature=0,
             batch_size=1,
         )
-        traj = model.codegen(message, num_samples=1)[0]
-        traj["prompt"] = message
-        raw_output = traj["response"]
-        # ZZ: use customized parse logic here
-        if "Relevant File Paths:" in raw_output:
-            model_found_files = raw_output.split("Relevant File Paths:")[-1].strip().split("\n")
-        else:
-            model_found_files = []
-        files, classes, functions = get_full_file_paths_and_classes_and_functions(
-            self.structure
-        )
-
-        # sort based on order of appearance in model_found_files
-        found_files = correct_file_paths(model_found_files, files, match_partial_paths)
-
-        self.logger.info(raw_output)
-        print(raw_output)
-
-        return (
-            found_files,
-            {"raw_output_files": raw_output},
-            traj,
-        )
+        files, classes, functions = get_full_file_paths_and_classes_and_functions(self.structure)
+        
+        # ZZ: try both hinted and original prompt, but only return found files using the correct ones
+        hint_found_files, hint_traj = self._request_file_localization(hinted=True, model=model, ground_truth_modified_files=ground_truth_modified_files)
+        unhint_found_files, unhint_traj = self._request_file_localization(hinted=False, model=model, ground_truth_modified_files=None)
+        # check if the generated paths actually exist or not
+        hint_found_files = correct_file_paths(hint_found_files, files, match_partial_paths=match_partial_paths)
+        unhint_found_files = correct_file_paths(unhint_found_files, files, match_partial_paths=match_partial_paths)
+        # construct template json  
+        constructed_hint_traj = self._construct_file_localization_trajectory( hint_found_files, ground_truth_modified_files, hint_traj, True)
+        constructed_unhint_traj = self._construct_file_localization_trajectory( unhint_found_files, ground_truth_modified_files, unhint_traj, False)
+        return constructed_hint_traj, constructed_unhint_traj
 
     def localize_function_for_files(
         self, file_names, mock=False
     ) -> tuple[list, dict, dict]:
-        from agentless.util.api_requests import num_tokens_from_messages
-        from agentless.util.model import make_model
 
         files, classes, functions = get_full_file_paths_and_classes_and_functions(
             self.structure
@@ -188,10 +184,8 @@ class LLMFL(FL):
 
         return model_found_locs_separated, {"raw_output_loc": raw_output}, traj
 
-    def localize_function_from_compressed_files(self, file_names, mock=False):
-        from agentless.util.api_requests import num_tokens_from_messages
-        from agentless.util.model import make_model
 
+    def _construct_function_class_var_localization_message(self, file_names, hinted):
         file_contents = get_repo_files(self.structure, file_names)
         compressed_file_contents = {
             fn: get_skeleton(code) for fn, code in file_contents.items()
@@ -201,46 +195,32 @@ class LLMFL(FL):
             for fn, code in compressed_file_contents.items()
         ]
         file_contents = "".join(contents)
-        template = (
-            obtain_relevant_functions_and_vars_from_compressed_files_prompt_more
-        )
-        message = template.format(
-            problem_statement=self.problem_statement, file_contents=file_contents
-        )
-
-        def message_too_long(message):
-            return (
-                num_tokens_from_messages(message, self.model_name) >= MAX_CONTEXT_LENGTH
-            )
-
-        while message_too_long(message) and len(contents) > 1:
-            self.logger.info(f"reducing to \n{len(contents)} files")
-            contents = contents[:-1]
-            file_contents = "".join(contents)
-            message = template.format(
+        if hinted:
+            pass
+        else:            
+            message = obtain_relevant_functions_and_vars_from_compressed_files_prompt_more.format(
                 problem_statement=self.problem_statement, file_contents=file_contents
-            )  # Recreate message
-
-        if message_too_long(message):
-            raise ValueError(
-                "The remaining file content is too long to fit within the context length"
             )
-        self.logger.info(f"prompting with message:\n{message}")
-        self.logger.info("=" * 80)
+        return message
+        
+    def _request_function_class_var_localization(self, model, message, file_names, ):
+        response = model.codegen(message, num_samples=1)[0]
+        model_found_locs = extract_code_blocks(response["response"])
+        model_found_locs_separated = extract_locs_for_files(
+            model_found_locs, file_names
+        )
+        traj = {
+            "stage": "fault_localization:function_class_var_localization",
+            "prompt": message,
+            "response": response["response"],
+            "predicted_modified_files": found_files,
+            "ground_truth_modified_files": ground_truth_modified_files,
+            "hinted": hinted
+        }
+        return traj 
 
-        if mock:
-            self.logger.info("Skipping querying model since mock=True")
-            traj = {
-                "prompt": message,
-                "usage": {
-                    "prompt_tokens": num_tokens_from_messages(
-                        message,
-                        self.model_name,
-                    ),
-                },
-            }
-            return [], {"raw_output_loc": ""}, traj
 
+    def localize_function_from_compressed_files(self, patch_info, constructed_hint_traj, constructed_unhint_traj):
         model = make_model(
             model=self.model_name,
             backend=self.backend,
@@ -249,26 +229,14 @@ class LLMFL(FL):
             temperature=0,
             batch_size=1,
         )
-        traj = model.codegen(message, num_samples=1)[0]
-        traj["prompt"] = message
-        raw_output = traj["response"]
+        # TODO: get ground truth function, class, var info etc 
+        
+        hint_message = self._construct_function_class_var_localization_message(constructed_hint_traj["predicted_modified_files"], True)
+        unhint_message = self._construct_function_class_var_localization_message(constructed_unhint_traj["predicted_modified_files"], False)
 
-        model_found_locs = extract_code_blocks(raw_output)
-        model_found_locs_separated = extract_locs_for_files(
-            model_found_locs, file_names
-        )
-
-        self.logger.info(f"==== raw output ====")
-        self.logger.info(raw_output)
-        self.logger.info("=" * 80)
-        self.logger.info(f"==== extracted locs ====")
-        for loc in model_found_locs_separated:
-            self.logger.info(loc)
-        self.logger.info("=" * 80)
-
-        print(raw_output)
-
-        return model_found_locs_separated, {"raw_output_loc": raw_output}, traj
+        self._request_function_class_var_localization()
+       
+        return xxx
 
     def localize_line_from_coarse_function_locs(
         self,
@@ -282,8 +250,6 @@ class LLMFL(FL):
         num_samples: int = 1,
         mock=False,
     ):
-        from agentless.util.api_requests import num_tokens_from_messages
-        from agentless.util.model import make_model
 
         file_contents = get_repo_files(self.structure, file_names)
         topn_content, file_loc_intervals = construct_topn_file_context(

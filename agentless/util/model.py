@@ -101,6 +101,7 @@ class DeepSeekChatDecoder(DecoderBase):
             assert num_samples == 1
 
         trajs = []
+        # ZZ: TODO this might cause issue when you are doing multi-threading ... 
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_samples) as executor:
             config = create_chatgpt_config(
                 message=message,

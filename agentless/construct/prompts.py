@@ -16,10 +16,37 @@ Following is the desired format:
 ### 
 Analysis: [Insert a brief analysis on which set of files are necessary to edit based on the problem description and repo structure]
 ###
-Relevant Directories: [Retrieve the complete relevant directories from the Repository Structure here based on your analysis]
+Relevant Directories: [Retrieve the **COMPLETE** relevant directories strcuture from the Repository Structure here based on your analysis. Make sure the retrieved directory IS NOT a sub directory but contains the root folder!]
 ###
-Relevant File Paths: [Put at most 10 **FULL PATHS** of the files that are relevant to the problem here. Each path should be in a single line]
+Relevant File Paths: [Put the **FULL PATHS** of the files that are relevant to the problem here. Each path should be in a single line. Return the necessary files only but limit the maximum number of files to 10.]
 ###
+"""
+
+obtain_relevant_files_prompt_with_hint = """
+Please look through the following GitHub problem description and Repository structure and provide a list of files that one would need to edit to fix the problem.
+
+### GitHub Problem Description ###
+{problem_statement}
+
+###
+
+### Repository Structure ###
+{structure}
+
+###
+
+Based on the problem description and repo structure, please give a brief analysis on which set of files are necessary to edit, then retrieve the relevant directory structures and return at most 10 files in full path.
+Following is the desired format:
+### 
+Analysis: [Insert a brief analysis on which set of files are necessary to edit based on the problem description and repo structure]
+###
+Relevant Directories: [Retrieve the **COMPLETE** relevant directories strcuture from the Repository Structure here based on your analysis. Make sure the retrieved directory IS NOT a sub directory but contains the root folder!]
+###
+Relevant File Paths: [Put the **FULL PATHS** of the files that are relevant to the problem here. Each path should be in a single line. Return the necessary files only but limit the maximum number of files to 10.]
+###
+
+Hint: The followings are the ground truth files that need to be modified, please construct your formatted response based on this info:
+{ground_truth_modified_files}
 """
 
     

@@ -37,14 +37,14 @@ from agentless.util.preprocess_data import (
 )
 
 
-def localize_instance(bench_data, args, logger, patch_info):
+def localize_instance(bench_data, args, logger, patch_info, cache_dir="/dataset/zszeng/AgentlessOutputs/playground"):
     instance_id = bench_data["instance_id"]
     logger.info(f"Processing bug {instance_id}")
 
     # we need to get the project structure directly
     # ZZ: TODO support multi-thread logic here  
     d = get_project_structure_from_scratch(
-        bench_data["repo"], bench_data["base_commit"], instance_id, "/dataset/zszeng/AgentlessOutputs/playground"
+        bench_data["repo"], bench_data["base_commit"], instance_id, cache_dir
     )
 
     logger.info(f"================ localize {instance_id} ================")
@@ -58,14 +58,6 @@ def localize_instance(bench_data, args, logger, patch_info):
     if not instance_id.startswith("pytest"):
         filter_out_test_files(structure)
 
-    found_files = []
-    found_related_locs = []
-    found_edit_locs = []
-    additional_artifact_loc_file = None
-    additional_artifact_loc_related = None
-    additional_artifact_loc_edit_location = None
-    file_traj, related_loc_traj, edit_loc_traj = {}, {}, {}
-
     fl = LLMFL(
         instance_id,
         structure,
@@ -76,25 +68,10 @@ def localize_instance(bench_data, args, logger, patch_info):
         args.match_partial_paths,
     )
     # file level localization
-    found_files, additional_artifact_loc_file, file_traj = fl.localize(
-        mock=args.mock
-    )
-
+    constructed_hint_traj, constructed_unhint_traj = fl.localize(patch_info, match_partial_paths=True)
     # related class, functions, global var localization
-    if len(found_files) != 0:
-        pred_files = found_files[: args.top_n]
-        
-        additional_artifact_loc_related = []
-        found_related_locs = []
-        related_loc_traj = {}
-        (
-            found_related_locs,
-            additional_artifact_loc_related,
-            related_loc_traj,
-        ) = fl.localize_function_from_compressed_files(
-            pred_files, mock=args.mock
-        )
-        additional_artifact_loc_related = [additional_artifact_loc_related]
+    = fl.localize_function_from_compressed_files(patch_info, constructed_hint_traj, constructed_unhint_traj)
+
         
 
     # Only supports the following args for now
@@ -444,7 +421,7 @@ def dispatch_tasks(args):
     for bench_data in swe_bench_data:
         if bench_data['instance_id'] in existing_instance_ids: continue # skip existing ids
         patch_info, modified_file_num, invalid_patch_parsing = parse_git_patch(bench_data["patch"])
-        if modified_file_num <= 10 and not invalid_patch_parsing:
+        if modified_file_num <= 10 and modified_file_num and not invalid_patch_parsing:
             # get rid of invalid patch commits and patches with too many modified files 
             filtered_bench_data_list.append(bench_data)
             parsed_patch_info_list.append(patch_info)
